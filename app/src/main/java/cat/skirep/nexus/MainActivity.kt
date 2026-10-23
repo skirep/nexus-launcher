@@ -3,6 +3,17 @@ package cat.skirep.nexus
 import android.content.Intent
 import android.content.pm.ResolveInfo
 import android.os.Bundle
+import android.content.Context
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.unit.Dp
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.*
@@ -67,7 +78,27 @@ private fun NexusHome() {
                 info.activityInfo.name, info.loadIcon(pm))
         }.distinctBy { it.packageName to it.activityName }.sortedBy { it.label.lowercase() }
     }
-    var theme by remember { mutableStateOf(NexusTheme.NEXUS) }
+    val preferences = remember { context.getSharedPreferences("nexus_settings", Context.MODE_PRIVATE) }
+    var theme by remember {
+        mutableStateOf(NexusTheme.entries.getOrElse(preferences.getInt("theme", 0)) { NexusTheme.NEXUS })
+    }
+    var tiltX by remember { mutableFloatStateOf(0f) }
+    var tiltY by remember { mutableFloatStateOf(0f) }
+    DisposableEffect(context) {
+        val manager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        val sensor = manager.getDefaultSensor(Sensor.TYPE_GRAVITY)
+        val listener = object : SensorEventListener {
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+            override fun onSensorChanged(event: SensorEvent) {
+                tiltX = (event.values[0] / 9.81f).coerceIn(-1f, 1f)
+                tiltY = (event.values[1] / 9.81f).coerceIn(-1f, 1f)
+            }
+        }
+        if (sensor != null) manager.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_UI)
+        onDispose { manager.unregisterListener(listener) }
+    }
+    val smoothX by animateFloatAsState(tiltX, animationSpec = tween(180), label = "tiltX")
+    val smoothY by animateFloatAsState(tiltY, animationSpec = tween(180), label = "tiltY")
     var search by remember { mutableStateOf("") }
     var showAll by remember { mutableStateOf(false) }
     val dark = theme != NexusTheme.MINIMAL
@@ -85,7 +116,17 @@ private fun NexusHome() {
     }
     val tile = if (dark) Color.White.copy(alpha = .11f) else Color.White.copy(alpha = .85f)
     val visibleApps = apps.filter { it.label.contains(search, ignoreCase = true) }
-    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(background))) {
+    BoxWithConstraints(Modifier.fillMaxSize().background(Brush.verticalGradient(background))) {
+        val unfolded = maxWidth >= 600.dp
+        Canvas(Modifier.fillMaxSize().graphicsLayer {
+            translationX = smoothX * 18f
+            translationY = smoothY * 18f
+        }) {
+            drawCircle(accent.copy(alpha = .13f), radius = size.minDimension * .53f,
+                center = androidx.compose.ui.geometry.Offset(size.width * .85f, size.height * .18f))
+            drawCircle(accent.copy(alpha = .08f), radius = size.minDimension * .32f,
+                center = androidx.compose.ui.geometry.Offset(size.width * .1f, size.height * .72f))
+        }
         Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(horizontal = 20.dp)) {
             Spacer(Modifier.height(24.dp))
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
@@ -93,12 +134,17 @@ private fun NexusHome() {
                     Text("NEXUS", color = accent, fontSize = 36.sp, fontWeight = FontWeight.Black, letterSpacing = 4.sp)
                     Text("BEYOND THE SCREEN", color = muted, fontSize = 10.sp, letterSpacing = 3.sp)
                 }
-                IconButton(onClick = { theme = NexusTheme.entries[(theme.ordinal + 1) % NexusTheme.entries.size] }) {
+                IconButton(onClick = {
+                    theme = NexusTheme.entries[(theme.ordinal + 1) % NexusTheme.entries.size]
+                    preferences.edit().putInt("theme", theme.ordinal).apply()
+                }) {
                     Icon(Icons.Default.Palette, "Canvia el tema", tint = accent)
                 }
             }
             Spacer(Modifier.height(24.dp))
-            Text(if (showAll) "Les teves aplicacions" else "El teu espai", color = foreground, fontSize = 23.sp, fontWeight = FontWeight.SemiBold)
+            Text(if (showAll) "Les teves aplicacions" else if (unfolded) "NEXUS DESKTOP" else "El teu espai",
+                color = foreground, fontSize = 23.sp, fontWeight = FontWeight.SemiBold)
+            if (unfolded) Text("Pantalla expandida · Escriptori adaptatiu", color = muted, fontSize = 12.sp)
             Spacer(Modifier.height(14.dp))
             OutlinedTextField(value = search, onValueChange = { search = it; if(it.isNotBlank()) showAll = true },
                 placeholder = { Text("Cerca aplicacions", color = muted) },
@@ -118,13 +164,25 @@ private fun NexusHome() {
             }
             Spacer(Modifier.height(16.dp))
             val displayed = if (showAll || search.isNotBlank()) visibleApps else visibleApps.take(8)
-            LazyVerticalGrid(columns = GridCells.Adaptive(minSize = 112.dp),
+            LazyVerticalGrid(columns = GridCells.Adaptive(minSize = if (unfolded) 150.dp else 112.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 contentPadding = PaddingValues(bottom = 30.dp)) {
                 items(displayed, key = { it.packageName + "/" + it.activityName }) { app ->
                     Column(
-                        modifier = Modifier.background(tile, RoundedCornerShape(22.dp))
+                        modifier = Modifier
+                            .graphicsLayer {
+                                rotationY = smoothX * 3f
+                                rotationX = -smoothY * 3f
+                                cameraDistance = 16f * density
+                            }
+                            .shadow(8.dp, RoundedCornerShape(22.dp), ambientColor = accent.copy(alpha = .2f))
+                            .clip(RoundedCornerShape(22.dp))
+                            .background(Brush.verticalGradient(listOf(
+                                tile.copy(alpha = if (dark) .9f else 1f),
+                                tile.copy(alpha = if (dark) .55f else .8f)
+                            )))
+                            .border(1.dp, accent.copy(alpha = .22f), RoundedCornerShape(22.dp))
                             .clickable {
                                 try {
                                     context.startActivity(Intent(Intent.ACTION_MAIN)
